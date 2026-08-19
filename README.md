@@ -1,0 +1,29 @@
+# 大观园 · 刷题
+
+题目整理自澄潇宇大观题库的本地/静态刷题站。  
+不登录、无后端；做题进度只保存在浏览器本地。
+
+## 在线
+
+GitHub Pages 发布后访问：
+
+https://watanabe-hsad.github.io/daguan-math/
+
+## 本地预览
+
+```bash
+python3 -m http.server 8765
+```
+
+打开 http://127.0.0.1:8765/
+
+## 功能
+
+- 分类树列表刷题（默认）/ 单题模式
+- 答案与解析（KaTeX）
+- 掌握标记、搜索、核心筛选、打乱
+- 进度本机保存
+
+## 说明
+
+题目配图默认走线上资源接口；若失效需自行镜像图片并改 `data/manifest.json` 中的 `asset_base_remote`。

@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>大观园 · 本地刷题</title>
+  <meta name="description" content="大观园数学题库本地静态刷题站" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <a class="brand" href="#" id="btn-brand">
+          <strong>大观园</strong>
+          <span>本地刷题</span>
+        </a>
+        <button type="button" class="icon-btn" id="btn-close-sidebar" aria-label="关闭侧栏">×</button>
+      </div>
+
+      <div class="sidebar-nav">
+        <button type="button" class="side-link active" id="nav-home" data-nav="home">首页</button>
+        <button type="button" class="side-link" id="nav-todo" data-nav="todo">未掌握</button>
+        <button type="button" class="side-link" id="nav-forgot" data-nav="forgot">易错题</button>
+      </div>
+
+      <div class="sidebar-tools">
+        <input id="search" type="search" placeholder="搜索题号 / 来源 / 题干…" autocomplete="off" />
+        <div class="tool-row">
+          <label class="check"><input type="checkbox" id="filter-core" /> 仅核心</label>
+          <label class="check"><input type="checkbox" id="filter-todo" /> 未掌握</label>
+        </div>
+      </div>
+
+      <div class="chapter-head">
+        <span>题库</span>
+        <div class="scope-toggle" role="group" aria-label="题库范围">
+          <button type="button" class="scope-btn active" data-scope="all">完整</button>
+          <button type="button" class="scope-btn" data-scope="core">核心</button>
+        </div>
+      </div>
+
+      <nav class="cat-tree" id="cat-tree" aria-label="分类"></nav>
+
+      <div class="sidebar-foot">
+        <div id="stats-line">加载中…</div>
+        <button type="button" class="linkish" id="btn-reset-progress">清除本地进度</button>
+      </div>
+    </aside>
+
+    <div class="main-wrap">
+      <header class="topbar">
+        <button type="button" class="icon-btn" id="btn-open-sidebar" aria-label="打开侧栏">☰</button>
+        <div class="crumb" id="crumb">选择左侧分类开始</div>
+        <div class="top-actions">
+          <div class="mode-toggle" role="group" aria-label="浏览模式">
+            <button type="button" class="mode-btn active" id="mode-list" data-mode="list" title="列表模式：一页多题">列表</button>
+            <button type="button" class="mode-btn" id="mode-single" data-mode="single" title="单题模式">单题</button>
+          </div>
+          <button type="button" class="btn ghost" id="btn-shuffle" title="打乱当前列表顺序">打乱</button>
+          <button type="button" class="btn ghost" id="btn-expand-all" title="展开当前已加载题目的答案">全开答案</button>
+          <button type="button" class="btn ghost" id="btn-home">首页</button>
+        </div>
+      </header>
+
+      <main class="main" id="main">
+        <section class="home" id="view-home">
+          <div class="hero">
+            <div class="hero-copy">
+              <p class="hero-kicker">离线题库 · 进度本机保存</p>
+              <h1>开始学习</h1>
+              <p class="muted hero-desc">题目整理自澄潇宇大观题库。点左侧分类，默认以列表连续刷题；需要时再切单题模式。</p>
+            </div>
+            <button type="button" class="btn primary hero-cta" id="btn-start">从高等数学开始 →</button>
+          </div>
+
+          <div class="metric-strip" id="metric-strip">
+            <div class="metric">
+              <span class="metric-label">题库总量</span>
+              <strong id="metric-total">—</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">已看过</span>
+              <strong id="metric-seen">—</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">已掌握</span>
+              <strong id="metric-mastered">—</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">易错</span>
+              <strong id="metric-forgot">—</strong>
+            </div>
+          </div>
+
+          <h2 class="section-title">题库分区</h2>
+          <div class="home-cards" id="home-cards"></div>
+
+          <div class="home-hint">
+            <p><strong>快捷键</strong>（单题模式）：<kbd>←</kbd>/<kbd>→</kbd> 上一/下一题，<kbd>A</kbd> 答案，<kbd>1-4</kbd> 选项。<span class="hint-sep">·</span> 列表模式可连续滚动，每题独立展开答案与标记掌握。</p>
+          </div>
+        </section>
+
+        <section class="browse hidden" id="view-browse">
+          <div class="browse-head">
+            <div class="browse-title">
+              <h2 id="browse-heading">题目</h2>
+              <p class="muted" id="browse-sub"></p>
+            </div>
+            <div class="browse-progress" id="browse-progress" hidden>
+              <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+              <span class="progress-label" id="progress-label"></span>
+            </div>
+          </div>
+
+          <!-- list mode -->
+          <div id="list-mode">
+            <ol class="q-feed" id="q-feed" aria-label="题目列表"></ol>
+            <div class="feed-foot" id="feed-foot">
+              <button type="button" class="btn" id="btn-load-more">加载更多</button>
+              <span class="muted" id="feed-status"></span>
+            </div>
+          </div>
+
+          <!-- single mode -->
+          <div id="single-mode" class="hidden">
+            <div class="practice-meta">
+              <div id="q-pos">—</div>
+              <div class="meta-right">
+                <span id="q-source" class="pill"></span>
+                <span id="q-type" class="pill soft"></span>
+                <span id="q-id" class="pill soft"></span>
+              </div>
+            </div>
+            <article class="q-card" id="single-card">
+              <div class="q-path" id="q-path"></div>
+              <div class="md q-stem" id="q-stem"></div>
+              <div class="options" id="q-options"></div>
+              <div class="q-actions">
+                <button type="button" class="btn" id="btn-prev">上一题</button>
+                <button type="button" class="btn primary" id="btn-toggle-answer">显示答案</button>
+                <button type="button" class="btn" id="btn-next">下一题</button>
+              </div>
+              <div class="mastery-row" id="single-mastery">
+                <span class="muted">掌握</span>
+                <button type="button" class="chip" data-mastery="not_started">未开始</button>
+                <button type="button" class="chip" data-mastery="learning">学习中</button>
+                <button type="button" class="chip" data-mastery="mastered">已掌握</button>
+                <button type="button" class="chip danger" data-mastery="forgot">易错</button>
+              </div>
+              <div class="answer-box hidden" id="answer-box">
+                <div class="answer-block">
+                  <h3>答案</h3>
+                  <div class="md" id="q-answer"></div>
+                </div>
+                <div class="answer-block">
+                  <h3>解析</h3>
+                  <div class="md" id="q-expl"></div>
+                </div>
+              </div>
+            </article>
+            <div class="list-strip" id="list-strip" aria-label="题目跳转"></div>
+          </div>
+        </section>
+
+        <section class="search-view hidden" id="view-search">
+          <h2>搜索结果 <span class="muted" id="search-count"></span></h2>
+          <div id="search-results"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+  <script defer src="./app.js"></script>
+</body>
+</html>
