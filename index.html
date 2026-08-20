@@ -45,6 +45,7 @@
 
       <div class="sidebar-foot">
         <div id="stats-line">加载中…</div>
+        <button type="button" class="linkish" id="btn-sync">同步进度</button>
         <button type="button" class="linkish" id="btn-reset-progress">清除本地进度</button>
       </div>
     </aside>
@@ -60,6 +61,7 @@
           </div>
           <button type="button" class="btn ghost" id="btn-shuffle" title="打乱当前列表顺序">打乱</button>
           <button type="button" class="btn ghost" id="btn-expand-all" title="展开当前已加载题目的答案">全开答案</button>
+          <button type="button" class="btn ghost" id="btn-export" title="导出当前题目为 PDF">导出 PDF</button>
           <button type="button" class="btn ghost" id="btn-home">首页</button>
         </div>
       </header>
@@ -113,6 +115,11 @@
               <span class="progress-label" id="progress-label"></span>
             </div>
           </div>
+          <div class="pick-bar" id="pick-bar">
+            <span class="pick-count" id="pick-count">已勾选 0 题</span>
+            <button type="button" class="btn ghost" id="btn-pick-queue">全选当前列表</button>
+            <button type="button" class="btn ghost" id="btn-pick-clear">清空勾选</button>
+          </div>
 
           <!-- list mode -->
           <div id="list-mode">
@@ -141,6 +148,7 @@
                 <button type="button" class="btn" id="btn-prev">上一题</button>
                 <button type="button" class="btn primary" id="btn-toggle-answer">显示答案</button>
                 <button type="button" class="btn" id="btn-next">下一题</button>
+                <label class="check pick-single"><input type="checkbox" id="single-pick" /> 勾选本题</label>
               </div>
               <div class="mastery-row" id="single-mastery">
                 <span class="muted">掌握</span>
@@ -173,6 +181,140 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status"></div>
+
+  <dialog id="dlg-export" class="sheet">
+    <div class="sheet-head">
+      <h2>导出 PDF</h2>
+      <button type="button" class="icon-btn" data-close="dlg-export" aria-label="关闭">×</button>
+    </div>
+    <p class="sheet-lead">题目卡片左侧可勾选。生成预览后，用浏览器「打印 → 另存为 PDF」。</p>
+    <fieldset class="choice-set">
+      <legend>范围</legend>
+      <label class="choice"><input type="radio" name="export-scope" value="picked" checked /> 已勾选 <span class="muted" id="export-count-picked"></span></label>
+      <label class="choice"><input type="radio" name="export-scope" value="queue" /> 当前列表 <span class="muted" id="export-count-queue"></span></label>
+      <label class="choice"><input type="radio" name="export-scope" value="todo" /> 未掌握 <span class="muted" id="export-count-todo"></span></label>
+      <label class="choice"><input type="radio" name="export-scope" value="forgot" /> 易错题 <span class="muted" id="export-count-forgot"></span></label>
+      <label class="choice"><input type="radio" name="export-scope" value="mastered" /> 已掌握 <span class="muted" id="export-count-mastered"></span></label>
+    </fieldset>
+    <div class="tool-row">
+      <label class="check"><input type="checkbox" id="export-answers" checked /> 包含答案</label>
+      <label class="check"><input type="checkbox" id="export-expl" checked /> 包含解析</label>
+    </div>
+    <p class="hint-note">单次建议不超过 80 题；太多时浏览器生成预览会变慢。大分类请按章节分批导出。</p>
+    <div class="sheet-actions">
+      <button type="button" class="btn" data-close="dlg-export">取消</button>
+      <button type="button" class="btn primary" id="btn-export-go">生成预览</button>
+    </div>
+  </dialog>
+
+  <dialog id="dlg-sync" class="sheet sheet-wide">
+    <div class="sheet-head">
+      <h2>同步进度</h2>
+      <button type="button" class="icon-btn" data-close="dlg-sync" aria-label="关闭">×</button>
+    </div>
+    <p class="sheet-lead">本站不能直接连大观园接口。推上去、拉回来都在官网用 F12 控制台跑一次脚本。</p>
+    <div class="sync-tabs" role="tablist">
+      <button type="button" class="sync-tab active" data-sync-tab="push">写到大观园</button>
+      <button type="button" class="sync-tab" data-sync-tab="pull">拉回本站</button>
+    </div>
+
+    <div id="sync-panel-push">
+      <ol class="guide">
+        <li>
+          <h3>确认要写上去的内容</h3>
+          <p>只会推送你在本站标记过的题，未开始的不会覆盖大观园已有进度。</p>
+          <ul class="sync-stats" id="sync-stats">
+            <li>已掌握 <strong id="sync-n-mastered">0</strong></li>
+            <li>易错 → 不熟练 <strong id="sync-n-forgot">0</strong></li>
+            <li>学习中 → 不熟练 <strong id="sync-n-learning">0</strong></li>
+          </ul>
+          <p class="muted" id="sync-empty-hint" hidden>还没有掌握标记，先在题目上点「已掌握 / 易错 / 学习中」。</p>
+        </li>
+        <li>
+          <h3>复制一次</h3>
+          <p>脚本里已经带上当前进度。</p>
+          <div class="sheet-actions inline">
+            <button type="button" class="btn primary" id="btn-copy-script">复制写入脚本</button>
+            <button type="button" class="btn" id="btn-download-progress">下载备份</button>
+          </div>
+        </li>
+        <li>
+          <h3>打开并登录澄潇宇大观园</h3>
+          <p>新标签打开官方站，确认已经登录。</p>
+          <p><a class="ext-link" href="https://cxyonly.fans/math" target="_blank" rel="noopener">https://cxyonly.fans/math</a></p>
+        </li>
+        <li>
+          <h3>按 F12，点「控制台」</h3>
+          <ul class="plain">
+            <li>键盘 <kbd>F12</kbd>（Mac 笔记本多为 <kbd>fn</kbd> + <kbd>F12</kbd>）。</li>
+            <li>在开发者工具里点顶部 <strong>Console / 控制台</strong>，不要留在 Elements。</li>
+            <li>必须在大观园这一页打开，不要在本站打开。</li>
+            <li>若提示不允许粘贴，先输入 <code>allow pasting</code> 回车，再粘贴。</li>
+          </ul>
+        </li>
+        <li>
+          <h3>粘贴，回车，输入 SYNC</h3>
+          <p>弹出确认框后输入 <code>SYNC</code> 才真正提交。默认只增不减。</p>
+        </li>
+      </ol>
+    </div>
+
+    <div id="sync-panel-pull" hidden>
+      <ol class="guide">
+        <li>
+          <h3>复制导出脚本</h3>
+          <p>这份脚本在大观园页面运行，把那边的掌握标记收成一份进度包。</p>
+          <div class="sheet-actions inline">
+            <button type="button" class="btn primary" id="btn-copy-pull-script">复制导出脚本</button>
+          </div>
+        </li>
+        <li>
+          <h3>打开并登录澄潇宇大观园</h3>
+          <p><a class="ext-link" href="https://cxyonly.fans/math" target="_blank" rel="noopener">https://cxyonly.fans/math</a></p>
+        </li>
+        <li>
+          <h3>按 F12，点「控制台」，粘贴回车</h3>
+          <ul class="plain">
+            <li>键盘 <kbd>F12</kbd>（Mac 笔记本多为 <kbd>fn</kbd> + <kbd>F12</kbd>）。</li>
+            <li>点 <strong>Console / 控制台</strong>。</li>
+            <li>若不能粘贴，输入 <code>allow pasting</code> 回车后再贴。</li>
+            <li>成功后会自动复制进度 JSON，并下载一份备份文件。</li>
+          </ul>
+        </li>
+        <li>
+          <h3>回到本站，写入本地记录</h3>
+          <p>优先点「从剪贴板导入」。不行就粘贴到下面，或选择刚下载的 JSON。</p>
+          <div class="sheet-actions inline">
+            <button type="button" class="btn primary" id="btn-import-clipboard">从剪贴板导入</button>
+            <button type="button" class="btn" id="btn-import-file">选择文件</button>
+            <input id="import-file" type="file" accept="application/json,.json" hidden />
+          </div>
+          <textarea id="import-text" class="import-area" rows="5" placeholder="也可把进度 JSON 粘贴在这里，再点下方写入"></textarea>
+          <button type="button" class="btn" id="btn-import-apply">写入本地记录</button>
+          <p class="hint-note">只会更新大观园里已有标记的题：掌握 → 已掌握，完全不会 → 易错，不熟练 → 学习中。本站多出来的标记不会被删掉。</p>
+        </li>
+      </ol>
+    </div>
+
+    <div class="sheet-actions">
+      <button type="button" class="btn" data-close="dlg-sync">关闭</button>
+    </div>
+  </dialog>
+
+  <div id="print-stage" class="print-stage hidden" hidden>
+    <div class="print-toolbar no-print">
+      <div class="print-toolbar-copy">
+        <strong>PDF 预览</strong>
+        <span class="muted" id="print-meta"></span>
+      </div>
+      <div class="print-toolbar-actions">
+        <button type="button" class="btn" id="btn-print-back">返回</button>
+        <button type="button" class="btn primary" id="btn-print-go">打印 / 存为 PDF</button>
+      </div>
+    </div>
+    <p class="print-tip no-print">打印对话框里，目标选「另存为 PDF」，纸张 A4，边距默认即可。建议文件名见预览封面。</p>
+    <div id="print-doc" class="print-doc"></div>
+  </div>
 
   <script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>

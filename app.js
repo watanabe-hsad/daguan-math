@@ -4,6 +4,7 @@
   const DATA = "./data";
   const PROGRESS_KEY = "daguan_local_progress_v1";
   const MODE_KEY = "daguan_local_mode_v1";
+  const PICK_KEY = "daguan_local_picked_v1";
   const PAGE_SIZE = 20;
   const TYPE_LABEL = {
     subjective: "主观题",
@@ -40,6 +41,7 @@
     mode: loadMode(), // list | single
     renderedCount: 0,
     specialQueue: null, // null | 'todo' | 'forgot'
+    picked: loadPicked(),
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -92,6 +94,62 @@
     } catch {
       return {};
     }
+  }
+
+  function loadPicked() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(PICK_KEY) || "[]");
+      return new Set((Array.isArray(raw) ? raw : []).map(String));
+    } catch {
+      return new Set();
+    }
+  }
+
+  function savePicked() {
+    localStorage.setItem(PICK_KEY, JSON.stringify([...state.picked]));
+    refreshPickUI();
+  }
+
+  function isPicked(id) {
+    return state.picked.has(String(id));
+  }
+
+  function setPicked(id, on) {
+    const key = String(id);
+    if (on) state.picked.add(key);
+    else state.picked.delete(key);
+    savePicked();
+  }
+
+  function pickedIdsOrdered() {
+    const seen = new Set();
+    const out = [];
+    for (const q of state.queue) {
+      const id = String(q.id);
+      if (state.picked.has(id) && !seen.has(id)) {
+        out.push(id);
+        seen.add(id);
+      }
+    }
+    for (const id of state.picked) {
+      if (!seen.has(id)) out.push(id);
+    }
+    return out;
+  }
+
+  function refreshPickUI() {
+    const n = state.picked.size;
+    const count = $("#pick-count");
+    if (count) count.textContent = `已勾选 ${n} 题`;
+    document.querySelectorAll("[data-pick-id]").forEach((el) => {
+      el.checked = state.picked.has(String(el.dataset.pickId));
+    });
+    document.querySelectorAll(".q-card[data-id]").forEach((card) => {
+      card.classList.toggle("is-picked", isPicked(card.dataset.id));
+    });
+    const single = $("#single-pick");
+    const q = typeof currentQ === "function" ? currentQ() : null;
+    if (single && q) single.checked = isPicked(q.id);
   }
 
   function saveProgress() {
@@ -622,6 +680,7 @@
     }
     ensureFeedSentinel();
     appendFeedPage();
+    refreshPickUI();
   }
 
   let feedLoading = false;
@@ -727,10 +786,16 @@
     if (p.seen) li.dataset.seen = "1";
     li.id = `q-${q.id}`;
 
+    const picked = isPicked(q.id);
+    if (picked) li.classList.add("is-picked");
+
     const head = document.createElement("div");
     head.className = "q-card-head";
     head.innerHTML = `
       <div class="q-card-index">
+        <label class="pick-check" title="勾选导出">
+          <input type="checkbox" data-pick-id="${q.id}" ${picked ? "checked" : ""} />
+        </label>
         <span class="q-num">${index + 1}</span>
         <span class="mastery-badge" data-mastery="${mastery}">${MASTERY_LABEL[mastery]}</span>
       </div>
@@ -740,6 +805,9 @@
         <span class="pill soft">${escapeHtml(TYPE_LABEL[q.type] || q.type || "题目")}</span>
         <span class="pill soft">#${q.id}</span>
       </div>`;
+    head.querySelector("[data-pick-id]").addEventListener("change", (e) => {
+      setPicked(q.id, e.target.checked);
+    });
 
     const path = document.createElement("div");
     path.className = "q-path";
@@ -922,6 +990,8 @@
 
     $("#btn-prev").disabled = state.index <= 0;
     $("#btn-next").disabled = state.index >= state.queue.length - 1;
+    const singlePick = $("#single-pick");
+    if (singlePick) singlePick.checked = isPicked(q.id);
     renderMasteryChips();
     renderListStrip();
     updateBrowseProgress();
@@ -1058,6 +1128,9 @@
       b.type = "button";
       b.className = "search-item";
       b.innerHTML = `
+        <label class="pick-check" title="勾选导出">
+          <input type="checkbox" data-pick-id="${h.id}" ${isPicked(h.id) ? "checked" : ""} />
+        </label>
         <div class="s-top">
           <span>#${h.id}</span>
           <span>${escapeHtml(h.source || "")}</span>
@@ -1065,6 +1138,10 @@
           <span>${escapeHtml(h.path || "")}</span>
         </div>
         <div class="s-stem">${escapeHtml(stripMd(h.stem || ""))}</div>`;
+      b.querySelector(".pick-check").addEventListener("click", (e) => e.stopPropagation());
+      b.querySelector("[data-pick-id]").addEventListener("change", (e) => {
+        setPicked(h.id, e.target.checked);
+      });
       b.addEventListener("click", async () => {
         const top = (h.path || "未分类").split(" / ")[0];
         const cat = state.categories.find((c) => c.name === top) || state.categories[0];
@@ -1107,6 +1184,547 @@
     setNavActive(null);
     $("#nav-home")?.classList.add("active");
     renderHome();
+  }
+
+  const EXPORT_SOFT_LIMIT = 80;
+  const EXPORT_HARD_LIMIT = 250;
+
+  function formatDate(d = new Date()) {
+    return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+  }
+
+  function isoDate(d = new Date()) {
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${d.getFullYear()}-${m}-${day}`;
+  }
+
+  function safeFilename(s) {
+    return String(s || "题目")
+      .replace(/[\\/:*?"<>|]+/g, "-")
+      .replace(/\s+/g, "")
+      .slice(0, 40) || "题目";
+  }
+
+  function progressBuckets() {
+    const mastered = [];
+    const forgot = [];
+    const learning = [];
+    for (const [id, p] of Object.entries(state.progress)) {
+      if (p.mastery === "mastered") mastered.push(id);
+      else if (p.mastery === "forgot") forgot.push(id);
+      else if (p.mastery === "learning") learning.push(id);
+    }
+    return { mastered, forgot, learning };
+  }
+
+  function buildProgressPayload() {
+    const map = {};
+    for (const [id, p] of Object.entries(state.progress)) {
+      if (p.mastery === "mastered") map[id] = "m";
+      else if (p.mastery === "forgot") map[id] = "f";
+      else if (p.mastery === "learning") map[id] = "l";
+    }
+    return {
+      v: 1,
+      src: "daguan-math",
+      at: Date.now(),
+      map,
+    };
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    }
+  }
+
+  function downloadText(filename, text, mime) {
+    const blob = new Blob([text], { type: mime || "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+  }
+
+  function closeSheet(id) {
+    const el = document.getElementById(id);
+    if (el && typeof el.close === "function") el.close();
+  }
+
+  function openSheet(id) {
+    const el = document.getElementById(id);
+    if (el && typeof el.showModal === "function") el.showModal();
+  }
+
+  function exportScopeLabel(scope) {
+    if (scope === "picked") return "已勾选";
+    if (scope === "todo") return "未掌握";
+    if (scope === "forgot") return "易错题";
+    if (scope === "mastered") return "已掌握";
+    return state.crumb || "当前列表";
+  }
+
+  async function collectExportQuestions(scope) {
+    if (scope === "queue") return state.queue.slice();
+    if (scope === "picked") {
+      const ids = pickedIdsOrdered();
+      if (!ids.length) return [];
+      return loadQueueQuestions(ids);
+    }
+    const b = progressBuckets();
+    let ids = [];
+    if (scope === "todo") ids = [...b.forgot, ...b.learning];
+    else if (scope === "forgot") ids = b.forgot;
+    else if (scope === "mastered") ids = b.mastered;
+    if (!ids.length) return [];
+    return loadQueueQuestions(ids);
+  }
+
+  function padIndex(n, total) {
+    const w = String(total).length;
+    return String(n).padStart(Math.max(2, w), "0");
+  }
+
+  function renderPrintOptions(q, withAnswers) {
+    const opts = q.options || [];
+    if (!opts.length) return "";
+    const correct = new Set((q.correct_labels || []).map((x) => String(x).toUpperCase()));
+    const rows = opts
+      .map((opt, i) => {
+        const lab = (opt.label || String.fromCharCode(65 + i)).toUpperCase();
+        const ok = withAnswers && correct.has(lab);
+        return `<div class="print-opt${ok ? " is-correct" : ""}"><span class="lab">${escapeHtml(lab)}</span><div class="md">${renderMarkdown(opt.content_md || "")}</div></div>`;
+      })
+      .join("");
+    return `<div class="print-opts">${rows}</div>`;
+  }
+
+  function buildPrintDoc(qs, { title, withAnswers, withExpl }) {
+    const date = formatDate();
+    const fname = `大观园-${safeFilename(title)}-${isoDate()}.pdf`;
+    const cover = `
+      <header class="print-cover">
+        <p class="kicker">大观园 · 本地刷题</p>
+        <h1>${escapeHtml(title)}</h1>
+        <p class="cover-meta">${qs.length} 题${withAnswers ? " · 含答案" : ""}${withExpl ? "与解析" : ""} · ${escapeHtml(date)}</p>
+        <p class="cover-foot">题目整理自澄潇宇大观题库，仅供个人复习。建议文件名：${escapeHtml(fname)}</p>
+      </header>`;
+    const items = qs
+      .map((q, i) => {
+        const idx = padIndex(i + 1, qs.length);
+        const tags = [
+          TYPE_LABEL[q.type] || q.type || "题目",
+          q.source || "",
+          `#${q.id}`,
+        ]
+          .filter(Boolean)
+          .map((t) => `<span>${escapeHtml(t)}</span>`)
+          .join("");
+        const ans = withAnswers
+          ? `<div class="print-ans"><h3>答案</h3><div class="md">${renderMarkdown(q.answer || "（无答案）")}</div>${
+              withExpl
+                ? `<div class="print-expl"><h3>解析</h3><div class="md">${renderMarkdown(q.explanation || "（无解析）")}</div></div>`
+                : ""
+            }</div>`
+          : "";
+        return `<article class="print-q">
+          <div class="print-q-head"><span class="idx">${idx}</span><div class="tags">${tags}</div></div>
+          ${q.category_path ? `<p class="path">${escapeHtml(q.category_path)}</p>` : ""}
+          <div class="md stem">${renderMarkdown(q.stem)}</div>
+          ${renderPrintOptions(q, withAnswers)}
+          ${ans}
+        </article>`;
+      })
+      .join("");
+    return { html: cover + items, filename: fname };
+  }
+
+  async function waitPrintAssets(root) {
+    const imgs = [...root.querySelectorAll("img")];
+    await Promise.all(
+      imgs.map((img) => {
+        if (img.complete && img.naturalWidth) return Promise.resolve();
+        return img.decode ? img.decode().catch(() => {}) : new Promise((res) => {
+          img.addEventListener("load", res, { once: true });
+          img.addEventListener("error", res, { once: true });
+        });
+      })
+    );
+    if (document.fonts && document.fonts.ready) {
+      try {
+        await document.fonts.ready;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  function closePrintPreview() {
+    document.body.classList.remove("print-preview");
+    const stage = $("#print-stage");
+    stage.hidden = true;
+    stage.classList.add("hidden");
+    $("#print-doc").innerHTML = "";
+  }
+
+  async function openPrintPreview(qs, opts) {
+    const { html, filename } = buildPrintDoc(qs, opts);
+    const stage = $("#print-stage");
+    const doc = $("#print-doc");
+    doc.innerHTML = html;
+    $("#print-meta").textContent = `${qs.length} 题 · ${opts.title} · ${filename}`;
+    stage.hidden = false;
+    stage.classList.remove("hidden");
+    document.body.classList.add("print-preview");
+    window.scrollTo(0, 0);
+    await waitPrintAssets(doc);
+  }
+
+  function refreshExportCounts() {
+    const b = progressBuckets();
+    const set = (id, n) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = n ? `（${n}）` : "";
+    };
+    set("export-count-picked", state.picked.size);
+    set("export-count-queue", state.queue.length);
+    set("export-count-todo", b.forgot.length + b.learning.length);
+    set("export-count-forgot", b.forgot.length);
+    set("export-count-mastered", b.mastered.length);
+    const pickedRadio = document.querySelector('input[name="export-scope"][value="picked"]');
+    const queueRadio = document.querySelector('input[name="export-scope"][value="queue"]');
+    if (pickedRadio) pickedRadio.disabled = !state.picked.size;
+    if (queueRadio) queueRadio.disabled = !state.queue.length;
+    if (state.picked.size && pickedRadio) pickedRadio.checked = true;
+    else if (state.queue.length && queueRadio) queueRadio.checked = true;
+    else if (!state.queue.length && !state.picked.size) {
+      const mastered = document.querySelector('input[name="export-scope"][value="mastered"]');
+      const todo = document.querySelector('input[name="export-scope"][value="todo"]');
+      if (mastered && b.mastered.length) mastered.checked = true;
+      else if (todo && (b.forgot.length || b.learning.length)) todo.checked = true;
+    }
+  }
+
+  async function runExportPreview() {
+    const scope =
+      document.querySelector('input[name="export-scope"]:checked')?.value || "queue";
+    const withAnswers = $("#export-answers").checked;
+    const withExpl = $("#export-expl").checked && withAnswers;
+    const btn = $("#btn-export-go");
+    btn.disabled = true;
+    btn.textContent = "正在整理题目…";
+    try {
+      const qs = await collectExportQuestions(scope);
+      if (!qs.length) {
+        toast(
+          scope === "picked"
+            ? "还没有勾选题目，点卡片左侧方框即可"
+            : scope === "queue"
+              ? "当前没有可导出的列表，先打开一个分类"
+              : "这个范围里没有题目"
+        );
+        return;
+      }
+      if (qs.length > EXPORT_HARD_LIMIT) {
+        toast(`一次最多 ${EXPORT_HARD_LIMIT} 题，请换更小的分类或筛选后再导出`);
+        return;
+      }
+      if (qs.length > EXPORT_SOFT_LIMIT) {
+        const ok = confirm(
+          `将导出 ${qs.length} 题。题目较多时预览和打印会比较慢，建议按章节分批。仍然继续？`
+        );
+        if (!ok) return;
+      }
+      closeSheet("dlg-export");
+      await openPrintPreview(qs, {
+        title: exportScopeLabel(scope),
+        withAnswers,
+        withExpl,
+      });
+    } catch (err) {
+      console.error(err);
+      toast("导出失败：" + (err.message || String(err)));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "生成预览";
+    }
+  }
+
+  function refreshSyncStats() {
+    const b = progressBuckets();
+    $("#sync-n-mastered").textContent = String(b.mastered.length);
+    $("#sync-n-forgot").textContent = String(b.forgot.length);
+    $("#sync-n-learning").textContent = String(b.learning.length);
+    const empty = !b.mastered.length && !b.forgot.length && !b.learning.length;
+    const hint = $("#sync-empty-hint");
+    if (hint) hint.hidden = !empty;
+    const copyBtn = $("#btn-copy-script");
+    const dlBtn = $("#btn-download-progress");
+    if (copyBtn) copyBtn.disabled = empty;
+    if (dlBtn) dlBtn.disabled = empty;
+  }
+
+  function officialSyncScript() {
+    const payload = buildProgressPayload();
+    return `(() => {
+  const payload = ${JSON.stringify(payload)};
+  if (!payload || !payload.map) {
+    console.error("进度数据为空。");
+    return;
+  }
+  const token = localStorage.getItem("daguan_token") || localStorage.getItem("token");
+  if (!token) {
+    console.error("未登录：在大观园页面找不到登录令牌。请先登录再运行。");
+    return;
+  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const hdr = () => {
+    const h = {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + token,
+    };
+    const csrf = localStorage.getItem("csrf_token");
+    if (csrf) h["X-CSRF-Token"] = csrf;
+    return h;
+  };
+  async function api(path, opt) {
+    const res = await fetch("/api" + path, Object.assign({ credentials: "same-origin", headers: hdr() }, opt || {}));
+    let data = null;
+    try { data = await res.json(); } catch (e) {}
+    return { res: res, data: data };
+  }
+  const localToRemote = { m: "mastered", f: "needs_practice", l: "needs_practice" };
+  const items = Object.keys(payload.map).map((id) => ({
+    id: id,
+    remote: localToRemote[payload.map[id]],
+  })).filter((x) => x.remote);
+  console.log("将预览写入 " + items.length + " 题（已掌握→掌握，易错/学习中→不熟练）。未开始的题不会提交。");
+  const word = prompt("确认写入 " + items.length + " 题到当前登录账号？输入 SYNC 开始，取消则退出");
+  if (word !== "SYNC") {
+    console.log("已取消");
+    return;
+  }
+  (async () => {
+    const csrfRes = await api("/auth/csrf");
+    const csrfToken = csrfRes.data && (csrfRes.data.csrf_token || csrfRes.data.token || (csrfRes.data.data && csrfRes.data.data.csrf_token));
+    if (csrfToken) localStorage.setItem("csrf_token", csrfToken);
+    const me = await api("/auth/me");
+    if (!me.res.ok) {
+      console.error("登录无效，请刷新大观园后重新登录。", me.res.status, me.data);
+      return;
+    }
+    const bodies = {
+      mastered: [{ mastery: "mastered" }, { mastered: true }],
+      needs_practice: [{ mastery: "needs_practice" }, { needs_practice: true }],
+    };
+    let shapeKey = null;
+    let ok = 0, fail = 0;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const list = shapeKey ? [shapeKey] : bodies[it.remote];
+      let done = false;
+      for (let j = 0; j < list.length; j++) {
+        const body = list[j];
+        const out = await api("/questions/" + it.id + "/state", { method: "PATCH", body: JSON.stringify(body) });
+        if (out.res.ok) {
+          shapeKey = body;
+          done = true;
+          break;
+        }
+        if (out.res.status === 401) {
+          console.error("登录过期，已停止。成功 " + ok + "，失败 " + fail);
+          return;
+        }
+      }
+      if (done) ok += 1;
+      else {
+        fail += 1;
+        console.warn("失败", it.id);
+      }
+      if ((i + 1) % 25 === 0) console.log("进度 " + (i + 1) + "/" + items.length + " 成功 " + ok + " 失败 " + fail);
+      await sleep(400);
+    }
+    console.log("完成", { ok: ok, fail: fail, total: items.length });
+  })();
+})();`;
+  }
+
+  function officialPullScript() {
+    return `(() => {
+  const token = localStorage.getItem("daguan_token") || localStorage.getItem("token");
+  if (!token) {
+    console.error("未登录：请先登录大观园再运行。");
+    return;
+  }
+  const hdr = () => {
+    const h = { Accept: "application/json", Authorization: "Bearer " + token };
+    const csrf = localStorage.getItem("csrf_token");
+    if (csrf) h["X-CSRF-Token"] = csrf;
+    return h;
+  };
+  async function api(path) {
+    const res = await fetch("/api" + path, { credentials: "same-origin", headers: hdr(), cache: "no-store" });
+    let data = null;
+    try { data = await res.json(); } catch (e) {}
+    return { res: res, data: data };
+  }
+  function toLocal(raw) {
+    const s = String(raw || "").toLowerCase();
+    if (s === "mastered" || s === "is_mastered" || s === "m") return "m";
+    if (s === "not_known" || s === "notknown" || s === "forgot" || s === "f") return "f";
+    if (s === "needs_practice" || s === "needspractice" || s === "learning" || s === "l") return "l";
+    return "";
+  }
+  function ingest(node, map) {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      node.forEach(function (x) { ingest(x, map); });
+      return;
+    }
+    if (typeof node !== "object") return;
+    const id = node.question_id || node.questionId || node.id;
+    const raw = node.mastery || node.mastery_level || node.level || node.status || node.state;
+    const code = toLocal(raw);
+    if (id != null && code && String(id).match(/^\\d+$/)) map[String(id)] = code;
+    const action = String(node.action || node.flow_event || node.event_type || "");
+    const qid = node.question_id || node.questionId;
+    if (qid != null) {
+      if (action.indexOf("mastered_mark") >= 0) map[String(qid)] = "m";
+      else if (action.indexOf("not_known_mark") >= 0) map[String(qid)] = "f";
+      else if (action.indexOf("needs_practice_mark") >= 0) map[String(qid)] = "l";
+    }
+    const keys = Object.keys(node);
+    const looksFlat = keys.length && keys.every(function (k) { return /^\\d+$/.test(k) && typeof node[k] === "string"; });
+    if (looksFlat) {
+      keys.forEach(function (k) {
+        const c = toLocal(node[k]);
+        if (c) map[k] = c;
+      });
+      return;
+    }
+    keys.forEach(function (k) { ingest(node[k], map); });
+  }
+  (async () => {
+    const me = await api("/auth/me");
+    if (!me.res.ok) {
+      console.error("登录无效，请刷新后重新登录。", me.res.status);
+      return;
+    }
+    const map = {};
+    const maps = [
+      "/questions/mastery-map?include_children=true&scope=complete",
+      "/questions/mastery-map?scope=complete",
+      "/questions/mastery-map?include_children=true&scope=all",
+    ];
+    for (let i = 0; i < maps.length; i++) {
+      const out = await api(maps[i]);
+      if (out.res.ok) ingest(out.data, map);
+    }
+    for (let page = 1; page <= 80; page++) {
+      const out = await api("/user/practice_events?page=" + page + "&per_page=100");
+      if (!out.res.ok) break;
+      const chunk = (out.data && (out.data.items || out.data.data || out.data.results)) || [];
+      const list = Array.isArray(chunk) ? chunk : (chunk.items || []);
+      if (!list.length) break;
+      ingest(list, map);
+      const total = out.data && (out.data.total || (out.data.data && out.data.data.total));
+      if (total && page * 100 >= total) break;
+    }
+    const n = Object.keys(map).length;
+    const payload = { v: 1, src: "cxyonly", at: Date.now(), map: map };
+    const text = JSON.stringify(payload);
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch (e) {}
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+    a.download = "daguan-from-official.json";
+    a.click();
+    console.log("已收集 " + n + " 题。" + (copied ? "进度 JSON 已复制到剪贴板。" : "剪贴板失败，请用下载的 json。") + "回到本地刷题站点「从剪贴板导入」。", payload);
+  })();
+})();`;
+  }
+
+  function parseProgressMap(text) {
+    const data = JSON.parse(text);
+    const map = {};
+    const put = (id, code) => {
+      const key = String(id);
+      if (!key || code == null) return;
+      if (code === "m" || code === "mastered") map[key] = "mastered";
+      else if (code === "f" || code === "forgot" || code === "not_known") map[key] = "forgot";
+      else if (code === "l" || code === "learning" || code === "needs_practice") map[key] = "learning";
+    };
+    if (data && data.map && typeof data.map === "object" && !Array.isArray(data.map)) {
+      for (const [id, v] of Object.entries(data.map)) put(id, v);
+      return map;
+    }
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      for (const [id, v] of Object.entries(data)) {
+        if (v && typeof v === "object" && v.mastery) put(id, v.mastery);
+        else if (typeof v === "string") put(id, v);
+      }
+    }
+    return map;
+  }
+
+  function applyImportedMap(map) {
+    const ids = Object.keys(map);
+    if (!ids.length) {
+      toast("进度包是空的");
+      return 0;
+    }
+    let n = 0;
+    for (const id of ids) {
+      const mastery = map[id];
+      if (!mastery) continue;
+      const cur = state.progress[id] || {};
+      state.progress[id] = { ...cur, mastery, seen: true, updated_at: Date.now() };
+      n += 1;
+    }
+    saveProgress();
+    renderHome();
+    if (state.view === "browse") {
+      if (state.mode === "list") renderFeed(true);
+      else renderSingle();
+    }
+    refreshSyncStats();
+    updateStats();
+    return n;
+  }
+
+  async function importProgressText(text) {
+    const raw = String(text || "").trim();
+    if (!raw) {
+      toast("没有可导入的内容");
+      return;
+    }
+    let map;
+    try {
+      map = parseProgressMap(raw);
+    } catch {
+      toast("JSON 解析失败，请检查粘贴内容");
+      return;
+    }
+    const n = applyImportedMap(map);
+    if (n) toast(`已写入本地 ${n} 题`);
   }
 
   function bindUI() {
@@ -1173,6 +1791,101 @@
       toast("已清除本地进度");
     });
 
+    document.querySelectorAll("[data-close]").forEach((el) => {
+      el.addEventListener("click", () => closeSheet(el.dataset.close));
+    });
+    $("#btn-export").addEventListener("click", () => {
+      refreshExportCounts();
+      openSheet("dlg-export");
+    });
+    $("#btn-export-go").addEventListener("click", () => runExportPreview());
+    $("#btn-print-back").addEventListener("click", closePrintPreview);
+    $("#btn-print-go").addEventListener("click", () => window.print());
+    $("#export-answers").addEventListener("change", () => {
+      const on = $("#export-answers").checked;
+      $("#export-expl").disabled = !on;
+      if (!on) $("#export-expl").checked = false;
+    });
+
+    $("#btn-sync").addEventListener("click", () => {
+      refreshSyncStats();
+      openSheet("dlg-sync");
+    });
+    $("#btn-download-progress").addEventListener("click", () => {
+      downloadText(
+        `daguan-progress-${isoDate()}.json`,
+        JSON.stringify(buildProgressPayload(), null, 2),
+        "application/json"
+      );
+      toast("已开始下载备份");
+    });
+    $("#btn-copy-script").addEventListener("click", async () => {
+      const ok = await copyText(officialSyncScript());
+      toast(ok ? "已复制，到大观园按 F12 打开控制台粘贴" : "复制失败，请改用下载备份");
+    });
+    document.querySelectorAll("[data-sync-tab]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const tab = btn.dataset.syncTab;
+        document.querySelectorAll("[data-sync-tab]").forEach((b) => {
+          b.classList.toggle("active", b.dataset.syncTab === tab);
+        });
+        $("#sync-panel-push").hidden = tab !== "push";
+        $("#sync-panel-pull").hidden = tab !== "pull";
+      });
+    });
+    $("#btn-copy-pull-script").addEventListener("click", async () => {
+      const ok = await copyText(officialPullScript());
+      toast(ok ? "已复制导出脚本，到大观园按 F12 粘贴" : "复制失败");
+    });
+    $("#btn-import-clipboard").addEventListener("click", async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        await importProgressText(text);
+      } catch {
+        toast("读不到剪贴板，请把 JSON 贴进文本框再点写入");
+      }
+    });
+    $("#btn-import-file").addEventListener("click", () => $("#import-file").click());
+    $("#import-file").addEventListener("change", async () => {
+      const file = $("#import-file").files && $("#import-file").files[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        $("#import-text").value = text;
+        await importProgressText(text);
+      } catch (err) {
+        toast("读取文件失败");
+      }
+      $("#import-file").value = "";
+    });
+    $("#btn-import-apply").addEventListener("click", () => importProgressText($("#import-text").value));
+    $("#btn-pick-queue").addEventListener("click", () => {
+      if (!state.queue.length) {
+        toast("先打开一个分类");
+        return;
+      }
+      for (const q of state.queue) state.picked.add(String(q.id));
+      savePicked();
+      toast(`已勾选当前列表 ${state.queue.length} 题`);
+    });
+    $("#btn-pick-clear").addEventListener("click", () => {
+      state.picked.clear();
+      savePicked();
+      toast("已清空勾选");
+    });
+    $("#single-pick").addEventListener("change", () => {
+      const q = currentQ();
+      if (!q) return;
+      setPicked(q.id, $("#single-pick").checked);
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      if (document.body.classList.contains("print-preview")) {
+        e.preventDefault();
+        closePrintPreview();
+      }
+    });
+
     els.filterCore.addEventListener("change", async () => {
       state.filterCore = els.filterCore.checked;
       if (els.filterCore.checked) {
@@ -1205,6 +1918,7 @@
     });
 
     document.addEventListener("keydown", (e) => {
+      if (document.body.classList.contains("print-preview")) return;
       if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
       if (state.view !== "browse") return;
       if (state.mode !== "single") return;
@@ -1242,6 +1956,7 @@
       paintTree();
       renderHome();
       setView("home");
+      refreshPickUI();
     } catch (err) {
       console.error(err);
       els.stats.textContent = "数据加载失败";
