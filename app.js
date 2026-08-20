@@ -205,10 +205,29 @@
     toast._t = setTimeout(() => els.toast.classList.add("hidden"), 1800);
   }
 
+  const fetchInflight = new Map();
+
   async function fetchJSON(path) {
-    const res = await fetch(path);
-    if (!res.ok) throw new Error(`加载失败 ${path}: ${res.status}`);
-    return res.json();
+    if (fetchInflight.has(path)) return fetchInflight.get(path);
+    const job = (async () => {
+      const res = await fetch(path, { cache: "force-cache" });
+      if (!res.ok) throw new Error(`加载失败 ${path}: ${res.status}`);
+      return res.json();
+    })();
+    fetchInflight.set(path, job);
+    try {
+      return await job;
+    } finally {
+      fetchInflight.delete(path);
+    }
+  }
+
+  function prefetchUrl(href) {
+    if (!href || document.querySelector(`link[rel="prefetch"][href="${href}"]`)) return;
+    const link = document.createElement("link");
+    link.rel = "prefetch";
+    link.href = href;
+    document.head.appendChild(link);
   }
 
   function assetUrl(src) {
@@ -289,6 +308,7 @@
     div.querySelectorAll("img").forEach((img) => {
       img.src = assetUrl(img.getAttribute("src") || "");
       img.loading = "lazy";
+      img.decoding = "async";
       img.alt = img.alt || "题目配图";
     });
     return div.innerHTML;
@@ -410,14 +430,81 @@
     updateBrowseProgress();
   }
 
+  const shardInflight = new Map();
+
   async function ensureShard(name) {
     if (state.shards.has(name)) return state.shards.get(name);
+    if (shardInflight.has(name)) return shardInflight.get(name);
     const meta = state.manifest.shards[name];
     if (!meta) throw new Error("未知分片: " + name);
-    const list = await fetchJSON(`${DATA}/${meta.file}`);
-    const map = new Map(list.map((q) => [q.id, q]));
-    state.shards.set(name, map);
-    return map;
+    const job = (async () => {
+      const list = await fetchJSON(`${DATA}/${meta.file}`);
+      const map = new Map(list.map((q) => [q.id, q]));
+      state.shards.set(name, map);
+      return map;
+    })();
+    shardInflight.set(name, job);
+    try {
+      return await job;
+    } finally {
+      shardInflight.delete(name);
+    }
+  }
+
+  let indexesReady = null;
+
+  function ensureIndexes() {
+    if (state.idIndex && Object.keys(state.idIndex).length) return Promise.resolve();
+    if (!indexesReady) {
+      indexesReady = Promise.all([
+        fetchJSON(`${DATA}/category_questions.json`),
+        fetchJSON(`${DATA}/id_index.json`),
+      ]).then(([catQuestions, idIndex]) => {
+        state.catQuestions = catQuestions;
+        state.idIndex = idIndex;
+      });
+    }
+    return indexesReady;
+  }
+
+  function prefetchCategory(catId) {
+    ensureIndexes().then(() => {
+      const ids = state.catQuestions[String(catId)] || [];
+      const names = new Set();
+      for (const id of ids) {
+        const n = state.idIndex[String(id)];
+        if (n) names.add(n);
+      }
+      for (const name of names) {
+        const meta = state.manifest && state.manifest.shards[name];
+        if (meta) prefetchUrl(`${DATA}/${meta.file}`);
+      }
+    }).catch(() => {});
+  }
+
+  function questionMarkdown(q) {
+    const parts = [];
+    if (q.stem) parts.push(String(q.stem).trim());
+    const opts = q.options || [];
+    if (opts.length) {
+      parts.push(
+        opts
+          .map((opt, i) => {
+            const lab = opt.label || String.fromCharCode(65 + i);
+            return `${lab}. ${opt.content_md || ""}`.trimEnd();
+          })
+          .join("\n")
+      );
+    }
+    if (q.answer) parts.push(`答案\n${String(q.answer).trim()}`);
+    if (q.explanation) parts.push(`解析\n${String(q.explanation).trim()}`);
+    return parts.filter(Boolean).join("\n\n") + "\n";
+  }
+
+  async function copyQuestionMarkdown(q) {
+    if (!q) return;
+    const ok = await copyText(questionMarkdown(q));
+    toast(ok ? "已复制 Markdown" : "复制失败");
   }
 
   async function getQuestion(id) {
@@ -490,6 +577,7 @@
         const collapsed = kids.classList.toggle("collapsed");
         twisty.textContent = collapsed ? "▸" : "▾";
       });
+      btn.addEventListener("pointerenter", () => prefetchCategory(n.id), { once: true });
       btn.addEventListener("click", () => openCategory(n.id));
 
       row.append(twisty, btn);
@@ -528,6 +616,7 @@
         </div>
         <div class="home-card-bar"><i style="width:${pct}%"></i></div>
         <span class="home-card-meta">${done ? `已掌握 ${done}` : "尚未开始"}</span>`;
+      b.addEventListener("pointerenter", () => prefetchCategory(n.id), { once: true });
       b.addEventListener("click", () => openCategory(n.id));
       els.homeCards.appendChild(b);
     }
@@ -544,6 +633,7 @@
   }
 
   async function openCategory(catId, startId = null) {
+    await ensureIndexes();
     state.specialQueue = null;
     state.currentCatId = catId;
     const trail = findCat(catId) || [];
@@ -571,6 +661,7 @@
   }
 
   async function openSpecial(kind) {
+    await ensureIndexes();
     state.specialQueue = kind;
     state.currentCatId = null;
     paintTree();
@@ -848,7 +939,14 @@
       setMode("single");
     });
 
-    actions.append(ansBtn, focusBtn);
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "btn ghost";
+    copyBtn.textContent = "复制 Markdown";
+    copyBtn.title = "复制本题源 Markdown";
+    copyBtn.addEventListener("click", () => copyQuestionMarkdown(q));
+
+    actions.append(ansBtn, focusBtn, copyBtn);
 
     const masteryRow = document.createElement("div");
     masteryRow.className = "mastery-row";
@@ -1279,6 +1377,7 @@
   }
 
   async function collectExportQuestions(scope) {
+    await ensureIndexes();
     if (scope === "queue") return state.queue.slice();
     if (scope === "picked") {
       const ids = pickedIdsOrdered();
@@ -1294,20 +1393,13 @@
     return loadQueueQuestions(ids);
   }
 
-  function padIndex(n, total) {
-    const w = String(total).length;
-    return String(n).padStart(Math.max(2, w), "0");
-  }
-
-  function renderPrintOptions(q, withAnswers) {
+  function renderPrintOptions(q) {
     const opts = q.options || [];
     if (!opts.length) return "";
-    const correct = new Set((q.correct_labels || []).map((x) => String(x).toUpperCase()));
     const rows = opts
       .map((opt, i) => {
-        const lab = (opt.label || String.fromCharCode(65 + i)).toUpperCase();
-        const ok = withAnswers && correct.has(lab);
-        return `<div class="print-opt${ok ? " is-correct" : ""}"><span class="lab">${escapeHtml(lab)}</span><div class="md">${renderMarkdown(opt.content_md || "")}</div></div>`;
+        const lab = opt.label || String.fromCharCode(65 + i);
+        return `<div class="print-opt"><span class="lab">${escapeHtml(lab)}.</span><div class="md">${renderMarkdown(opt.content_md || "")}</div></div>`;
       })
       .join("");
     return `<div class="print-opts">${rows}</div>`;
@@ -1316,41 +1408,33 @@
   function buildPrintDoc(qs, { title, withAnswers, withExpl }) {
     const date = formatDate();
     const fname = `大观园-${safeFilename(title)}-${isoDate()}.pdf`;
-    const cover = `
-      <header class="print-cover">
-        <p class="kicker">大观园 · 本地刷题</p>
-        <h1>${escapeHtml(title)}</h1>
-        <p class="cover-meta">${qs.length} 题${withAnswers ? " · 含答案" : ""}${withExpl ? "与解析" : ""} · ${escapeHtml(date)}</p>
-        <p class="cover-foot">题目整理自澄潇宇大观题库，仅供个人复习。建议文件名：${escapeHtml(fname)}</p>
+    const extra = [withAnswers ? "含答案" : "", withExpl ? "含解析" : ""].filter(Boolean).join(" · ");
+    const mast = `
+      <header class="print-mast">
+        <strong>${escapeHtml(title)}</strong>
+        <span>${qs.length} 题${extra ? " · " + extra : ""} · ${escapeHtml(date)}</span>
       </header>`;
     const items = qs
       .map((q, i) => {
-        const idx = padIndex(i + 1, qs.length);
-        const tags = [
-          TYPE_LABEL[q.type] || q.type || "题目",
-          q.source || "",
-          `#${q.id}`,
-        ]
-          .filter(Boolean)
-          .map((t) => `<span>${escapeHtml(t)}</span>`)
-          .join("");
-        const ans = withAnswers
-          ? `<div class="print-ans"><h3>答案</h3><div class="md">${renderMarkdown(q.answer || "（无答案）")}</div>${
-              withExpl
-                ? `<div class="print-expl"><h3>解析</h3><div class="md">${renderMarkdown(q.explanation || "（无解析）")}</div></div>`
-                : ""
-            }</div>`
-          : "";
+        const bits = [TYPE_LABEL[q.type] || q.type, q.source, `#${q.id}`].filter(Boolean);
+        const meta = `${i + 1}. ${bits.join(" · ")}`;
+        let key = "";
+        if (withAnswers) {
+          key = `<div class="print-key"><div class="print-key-row"><span class="print-lab">答</span><div class="md">${renderMarkdown(q.answer || "（无）")}</div></div>`;
+          if (withExpl) {
+            key += `<div class="print-key-row"><span class="print-lab">析</span><div class="md">${renderMarkdown(q.explanation || "（无）")}</div></div>`;
+          }
+          key += `</div>`;
+        }
         return `<article class="print-q">
-          <div class="print-q-head"><span class="idx">${idx}</span><div class="tags">${tags}</div></div>
-          ${q.category_path ? `<p class="path">${escapeHtml(q.category_path)}</p>` : ""}
+          <p class="print-q-meta">${escapeHtml(meta)}</p>
           <div class="md stem">${renderMarkdown(q.stem)}</div>
-          ${renderPrintOptions(q, withAnswers)}
-          ${ans}
+          ${renderPrintOptions(q)}
+          ${key}
         </article>`;
       })
       .join("");
-    return { html: cover + items, filename: fname };
+    return { html: mast + items, filename: fname };
   }
 
   async function waitPrintAssets(root) {
@@ -1800,6 +1884,7 @@
     });
     $("#btn-export-go").addEventListener("click", () => runExportPreview());
     $("#btn-print-back").addEventListener("click", closePrintPreview);
+    $("#btn-copy-md").addEventListener("click", () => copyQuestionMarkdown(currentQ()));
     $("#btn-print-go").addEventListener("click", () => window.print());
     $("#export-answers").addEventListener("change", () => {
       const on = $("#export-answers").checked;
@@ -1912,6 +1997,7 @@
     });
 
     let searchTimer = null;
+    els.search.addEventListener("focus", () => prefetchUrl(`${DATA}/search_index.json`), { once: true });
     els.search.addEventListener("input", () => {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => runSearch(els.search.value), 200);
@@ -1943,20 +2029,24 @@
     bindUI();
     applyModeUI();
     try {
-      const [manifest, categories, catQuestions, idIndex] = await Promise.all([
-        fetchJSON(`${DATA}/manifest.json`),
-        fetchJSON(`${DATA}/categories.json`),
+      indexesReady = Promise.all([
         fetchJSON(`${DATA}/category_questions.json`),
         fetchJSON(`${DATA}/id_index.json`),
+      ]).then(([catQuestions, idIndex]) => {
+        state.catQuestions = catQuestions;
+        state.idIndex = idIndex;
+      });
+      const [manifest, categories] = await Promise.all([
+        fetchJSON(`${DATA}/manifest.json`),
+        fetchJSON(`${DATA}/categories.json`),
       ]);
       state.manifest = manifest;
       state.categories = categories;
-      state.catQuestions = catQuestions;
-      state.idIndex = idIndex;
       paintTree();
       renderHome();
       setView("home");
       refreshPickUI();
+      indexesReady.then(() => renderHome()).catch(() => {});
     } catch (err) {
       console.error(err);
       els.stats.textContent = "数据加载失败";
